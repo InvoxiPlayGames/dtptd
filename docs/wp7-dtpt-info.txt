@@ -1,0 +1,65 @@
+WP7 DTPT USB protocol notes by Emma IPG
+
+02-May-2026: Initial notes
+
+--
+
+DeskTop PassThrough connections are handled via WMZuneComm.exe
+TODO: find out what service on-device is responsible for it
+
+on the WP7 USB device (045E:04EC):
+- Interface 0 is largely MTP, used for Zune app and etc
+- Interface 1 is for DTPT, used for network forwarding and dev tools
+  - Endpoint 4 is IN for messages from the device
+  - Endpoint 5 is OUT for messages to the device
+
+Protocol is basically IP over PPP (RFC-1661, RFC-1332), with no auth and MPPC
+compression (RFC-2118), in HLDC-like framing (RFC-1662).
+
+Nokia Care Suite drivers don't allow the Zune app to get the DTPT connection
+going; replace with Zune ("Windows Phone USB") drivers in Device Manager. Other
+WinUSB applications can do it just fine so idk what's up with that.
+
+The Interface 1 endpoints don't respond to anything unless there is an active
+MTP session on Interface 0.
+
+--
+
+Connection process goes as follows:
+(Z = WMZuneComm/The PC, P = The puone)
+
+TODO: Something extra is required before the control request works (handled
+by default on Windows)
+
+WP7 handshake:
+Z->P: Control request to start the connection
+  bmRequestType: 0x21; bmRequest: 0x22; wValue: 0x1; wIndex: 0x1; wLength: 0
+P->Z: "CLIENT" dialin
+Z->P: "CLIENTSERVER" response
+
+Link establishment:
+P->Z: LCP config request - enable protocol compression, address/control field
+  compression, no forbidden async control characters.
+Z->P: LCP config ack
+Z->P: LCP config request of identical parameters
+P->Z: LCP config ack
+
+Network establishment - these all happen roughly at the same time:
+Z->P: IPCP config request - enable VJ compression, say IP is 192.168.55.100
+Z->P: CCP config request - negotiate MPPC
+P->Z: CCP config request - negotiate MPPC
+P->Z: IPCP config request - enable VJ comp, say IP, DNS, NBNS, etc addrs are
+  all 0.0.0.0
+
+Network establishment continues:
+Z->P: CCP config ack
+Z->P: IPCP config nak - tell device IP is 192.168.55.101 and DNS is 127.0.0.1
+P->Z: IPCP config ack
+P->Z: CCP config ack
+P->Z: IPCP config request, enable VJ comp, say IP is 192.168.55.101 and DNS is
+  127.0.0.1
+Z->P: IPCP config ack
+
+Data flow begins after both sides have sent IPCP config acknowledgements.
+
+--

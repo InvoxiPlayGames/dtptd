@@ -1,0 +1,18 @@
+# build artifacts
+build
+bin
+dtptd
+.dSYM
+*.pdb
+*.exe
+*.dll
+*.so
+*.dylib
+.cache
+# os
+.DS_Store
+# leftover files
+*.pcap
+*.pcapng
+*.pppd
+compile_commands.json
