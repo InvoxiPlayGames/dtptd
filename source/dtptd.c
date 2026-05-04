@@ -12,6 +12,7 @@
 #include <libusb.h>
 #include <libmtp.h>
 
+#include "tun.h"
 #include "picoppp.h"
 
 #define VID_MICROSOFT  0x045E
@@ -40,17 +41,26 @@ int libusb_ppp_output_func(void *arg, const uint8_t *buf, size_t len)
     return libusb_bulk_transfer((libusb_device_handle *)arg, 0x05, (uint8_t *)buf, len, NULL, 500);
 }
 
-
 int main(int argc, char **argv)
 {
+    ppp_state_t *state = NULL;
+    LIBMTP_mtpdevice_t *mtp_dev = NULL;
+    libusb_device *found_device = NULL;
+    libusb_device_handle *dev = NULL;
+
     printf("dtptd init\n");
     init_usb();
+
+    if (tun_start_interface() >= 0) {
+        printf("started network interface on '%s'\n", tun_get_ifname());
+    } else {
+        printf("FAILED TO START NETWORK INTERFACE!!\n");
+        printf("bad things will probably happen!\n");
+    }
 
     printf("searching for devices...\n");
     // scan the list of devices
     libusb_device **device_list = NULL;
-    libusb_device *found_device = NULL;
-    libusb_device_handle *dev = NULL;
     ssize_t sz = libusb_get_device_list(ctx, &device_list);
     for (ssize_t i = 0; i < sz; i++) {
         // fetch the descriptor to see if it's a device in DLOAD mode
@@ -86,7 +96,6 @@ int main(int argc, char **argv)
     }
     // start an MTP session, necessary to get it to listen for USB PPP
     bool do_mtp = true; // TODO(Emma): make this optional
-    LIBMTP_mtpdevice_t *mtp_dev = NULL;
     if (do_mtp) {
         LIBMTP_Init();
         LIBMTP_raw_device_t *mtp_list;
@@ -94,18 +103,21 @@ int main(int argc, char **argv)
         LIBMTP_Detect_Raw_Devices(&mtp_list, &returned);
         for (int i = 0; i < returned; i++) {
             // make sure it's the exact same device as the libusb one we got earlier
-            if (mtp_list[i].bus_location == libusb_get_bus_number(found_device) && mtp_list[i].devnum == libusb_get_device_address(found_device)) {
+            if (mtp_list[i].bus_location == libusb_get_bus_number(found_device) &&
+                mtp_list[i].devnum == libusb_get_device_address(found_device)) {
                 printf("connecting to MTP device...");
                 mtp_dev = LIBMTP_Open_Raw_Device(&mtp_list[i]);
                 break;
             }
         }
         if (mtp_dev == NULL) {
-            printf("failed to open MTP device!!");
+            printf("failed to open MTP device! probably already open...\n");
         } else {
             char *model_name = LIBMTP_Get_Modelname(mtp_dev);
-            printf("%s\n", model_name);
-            free(model_name);
+            if (model_name != NULL) {
+                printf("%s\n", model_name);
+                free(model_name);
+            }
         }
     }
 
@@ -119,7 +131,11 @@ int main(int argc, char **argv)
     libusb_control_transfer(dev, 0x21, 0x22, 0x0001, 1, NULL, 0, 500);
 
     // setting up our PPP state
-    ppp_state_t *state = ppp_alloc_state();
+    state = ppp_alloc_state();
+    if (state == NULL) {
+        printf("failed to allocate state\n");
+        goto quit;
+    }
     ppp_init_state(state, libusb_ppp_output_func, (void *)dev, NULL);
 
     while (true) {
@@ -142,6 +158,7 @@ int main(int argc, char **argv)
 
 quit:
     printf("shutting down...\n");
+    tun_close_interface();
     if (state != NULL) {
         free(state);
     }

@@ -1,6 +1,7 @@
 WP7 DTPT USB protocol notes by Emma IPG
 
 02-May-2026: Initial notes
+04-May-2026: Add note about constantly connected TCP port
 
 --
 
@@ -61,5 +62,11 @@ P->Z: IPCP config request, enable VJ comp, say IP is 192.168.55.101 and DNS is
 Z->P: IPCP config ack
 
 Data flow begins after both sides have sent IPCP config acknowledgements.
+
+After IP begins, the device immediately tries connecting to 192.168.55.100:64695
+and if this connection fails, after a few seconds the PPP link is terminated.
+This port is used for DNS resolution if the DNS is set to 127.0.0.1, unsure if
+it's used for anything else, but it has no traffic if the DNS is set to a
+publicly routable DNS server.
 
 --

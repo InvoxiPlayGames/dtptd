@@ -14,10 +14,15 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <string.h>
+#include <pthread.h>
 
 #include "ppp_defs.h"
 
+// TODO(Emma): for future improvements, we should seperate IP stuff out of here
+#include "tun.h"
+
 typedef struct _ppp_state_t {
+    bool link_up; // whether the link should be considered "up" or not
     bool link_done; // after phone gives us an LCP Config-Ack
     bool net_done; // after we give the phone an IPCP Config-Ack
     // output
@@ -29,6 +34,26 @@ typedef struct _ppp_state_t {
 
 // forward declare this
 int ppp_send_outgoing(ppp_state_t *state, const uint8_t *packet, size_t packetsz);
+
+// thread for receiving packets from the tunnel and sending to the device
+// TODO(Emma): move this out of picoppp and make it more generic
+static void *ppp_temp_tun_thread(void *arg)
+{
+    ppp_state_t *state = (ppp_state_t *)arg;
+    printf("starting network thread\n");
+    while (state->link_up && state->net_done) {
+        uint8_t packetbuf[2048];
+        packetbuf[0] = PPP_PROTO_IPV4;
+        int r = tun_recv_packet(packetbuf + 1, sizeof(packetbuf) - 1);
+        if (r > 0 && state->net_done) {
+            // TODO(Emma): check IP headers to see if the packet is valid and to see if it's
+            //  destined to the device
+            ppp_send_outgoing(state, packetbuf, r + 1);
+        }
+    }
+    printf("ending network thread\n");
+    pthread_exit(NULL);
+}
 
 // FCS calculation table and code from https://datatracker.ietf.org/doc/html/rfc1662#appendix-C.2
 static uint16_t fcstab[256] = {
@@ -168,6 +193,7 @@ static int ppp_handle_lcp_msg(ppp_state_t *state, const uint8_t *msg, size_t len
     switch (code) {
         case PPP_CTRL_CONFIG_REQ: {
             printf("LCS: recv PPP_CTRL_CONFIG_REQ\n");
+            state->link_up = true;
             // HACK(Emma): just return exactly what the device expects to recieve
             // hardcoded reply, assumes exactly what the device asked for
             uint8_t reply[] = {
@@ -180,6 +206,7 @@ static int ppp_handle_lcp_msg(ppp_state_t *state, const uint8_t *msg, size_t len
                 0x8, 0x2 // ACFC enable
             };
             ppp_send_outgoing(state, reply, sizeof(reply));
+            printf("LCP: sent PPP_CTRL_CONFIG_ACK\n");
             // HACK(Emma): now just send exactly what the Zune server sends
             // hardcoded again; now we're the ones assuming what we need
             uint8_t request[] = {
@@ -192,6 +219,7 @@ static int ppp_handle_lcp_msg(ppp_state_t *state, const uint8_t *msg, size_t len
                 0x8, 0x2 // ACFC enable
             };
             ppp_send_outgoing(state, request, sizeof(request));
+            printf("LCP: sent PPP_CTRL_CONFIG_REQ\n");
             break;
         }
         case PPP_CTRL_CONFIG_ACK: {
@@ -200,13 +228,40 @@ static int ppp_handle_lcp_msg(ppp_state_t *state, const uint8_t *msg, size_t len
             state->link_done = true;
             break;
         }
+        case PPP_CTRL_TERM_REQ: {
+            printf("LCS: recv PPP_CTRL_TERM_REQ\n");
+            state->link_done = false;
+            state->net_done = false;
+            uint8_t ack[] = {
+                0xc0, 0x21, // PPP_PROTO_LCP
+                PPP_CTRL_TERM_ACK,
+                identifier,
+                0x00, 0x04 // length
+            };
+            ppp_send_outgoing(state, ack, sizeof(ack));
+            printf("LCP: sent PPP_CTRL_TERM_ACK\n");
+            uint8_t req[] = {
+                0xc0, 0x21, // PPP_PROTO_LCP
+                PPP_CTRL_TERM_REQ,
+                identifier + 1,
+                0x00, 0x04 // length
+            };
+            ppp_send_outgoing(state, req, sizeof(req));
+            printf("LCP: sent PPP_CTRL_TERM_REQ\n");
+        }
+        case PPP_CTRL_TERM_ACK: {
+            printf("LCS: recv PPP_CTRL_TERM_ACK\n");
+            state->link_done = false;
+            state->net_done = false;
+            state->link_up = false;
+            break;
+        }
         default:
             printf("Unhandled LCP message (%02x,%02x)!\n", code, identifier);
             break;
     }
     return 0;
 }
-
 
 static int ppp_handle_ccp_msg(ppp_state_t *state, const uint8_t *msg, size_t len)
 {
@@ -265,7 +320,78 @@ static int ppp_handle_ccp_msg(ppp_state_t *state, const uint8_t *msg, size_t len
             break;
         }
         default:
-            printf("Unhandled LCP message (%02x,%02x)!\n", code, identifier);
+            printf("Unhandled CCP message (%02x,%02x)!\n", code, identifier);
+            break;
+    }
+    return 0;
+}
+
+static int ppp_handle_ipcp_msg(ppp_state_t *state, const uint8_t *msg, size_t len)
+{
+    uint8_t code = msg[0];
+    uint8_t identifier = msg[1];
+    switch (code) {
+        case PPP_CTRL_CONFIG_REQ: {
+            printf("IPCP: recv PPP_CTRL_CONFIG_REQ\n");
+            // HACK(Emma): if the length is 40 bytes, this is the original one sent by the phone
+            //  WE MUST NAK THIS ONE! this is where we send the guest's true IP
+            if (msg[3] == 0x28) {
+                // we should let the device know about our own IP
+                uint8_t req[] = {
+                    0x80, 0x21,
+                    PPP_CTRL_CONFIG_REQ,
+                    identifier + 1,
+                    0x0, 0x0A, // length
+                    0x3, // IP address
+                    0x6, // length of IP config
+                    0x0, 0x0, 0x0, 0x0, // IPv4 address (fill this in)
+                };
+                uint32_t host_ipv4 = tun_get_host_ip();
+                memcpy(&req[8], &host_ipv4, sizeof(uint32_t));
+                ppp_send_outgoing(state, req, sizeof(req));
+                printf("IPCP: sent PPP_CTRL_CONFIG_REQ\n");
+                // and then send our rejection
+                uint8_t nak[] = {
+                    0x80, 0x21,
+                    PPP_CTRL_CONFIG_NAK,
+                    identifier,
+                    0x0, 0x10, // length
+                    0x3, // IP address
+                    0x6, // length of IP config
+                    0x0, 0x0, 0x0, 0x0, // IPv4 address (fill this in)
+                    0x81, // DNS server
+                    0x6, // length of DNS config
+                    0x01, 0x01, 0x01, 0x01 // hardcode 1.1.1.1 just to see what happens
+                    // TODO(Emma): have configurable DNS
+                };
+                uint32_t guest_ipv4 = tun_get_guest_ip();
+                memcpy(&nak[8], &guest_ipv4, sizeof(uint32_t));
+                ppp_send_outgoing(state, nak, sizeof(nak));
+                printf("IPCP: sent PPP_CTRL_CONFIG_NAK\n");
+            } else if (msg[3] == 0x16) {
+                // device is likely requesting what we just sent, let's just blindly ACK it
+                uint8_t ack[0x18] = {
+                    0x80, 0x21,
+                    PPP_CTRL_CONFIG_ACK,
+                    identifier,
+                };
+                memcpy(ack + 0x4, msg + 0x2, 0x14); // TODO(Emma): aaagh hardcoded nooooo
+                ppp_send_outgoing(state, ack, sizeof(ack));
+                printf("IPCP: sent PPP_CTRL_CONFIG_ACK\n");
+                state->net_done = true;
+                pthread_t tunlisten;
+                pthread_create(&tunlisten, NULL, ppp_temp_tun_thread, (void *)state);
+            } else {
+                printf("device sent an unknown config");
+            }
+            break;
+        }
+        case PPP_CTRL_CONFIG_ACK: {
+            printf("IPCP: recv PPP_CTRL_CONFIG_ACK\n");
+            break;
+        }
+        default:
+            printf("Unhandled IPCP message (%02x,%02x)!\n", code, identifier);
             break;
     }
     return 0;
@@ -364,6 +490,13 @@ int ppp_handle_incoming(ppp_state_t *state, const uint8_t *packet, size_t packet
             break;
         case PPP_PROTO_CCP:
             ppp_handle_ccp_msg(state, data_ptr, msg_sz);
+            break;
+        case PPP_PROTO_IPCP:
+            ppp_handle_ipcp_msg(state, data_ptr, msg_sz);
+            break;
+        case PPP_PROTO_IPV4:
+            if (state->net_done) // ignore all IPv4 packets unless network link is set up
+                tun_dispatch_packet(data_ptr, msg_sz);
             break;
         default:
             printf("Unhandled PPP protocol (%04x)!\n", msg_proto);
