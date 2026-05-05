@@ -29,9 +29,6 @@ MTP session on Interface 0.
 Connection process goes as follows:
 (Z = WMZuneComm/The PC, P = The puone)
 
-TODO: Something extra is required before the control request works (handled
-by default on Windows)
-
 WP7 handshake:
 Z->P: Control request to start the connection
   bmRequestType: 0x21; bmRequest: 0x22; wValue: 0x1; wIndex: 0x1; wLength: 0

@@ -21,14 +21,14 @@ const char *tun_get_ifname()
 uint32_t tun_get_host_ip()
 {
     uint32_t ipv4_addr = 0;
-    inet_pton(AF_INET, "192.168.50.100", &ipv4_addr);
+    inet_pton(AF_INET, "192.168.55.100", &ipv4_addr);
     return ipv4_addr;
 }
 
 uint32_t tun_get_guest_ip()
 {
     uint32_t ipv4_addr = 0;
-    inet_pton(AF_INET, "192.168.50.101", &ipv4_addr);
+    inet_pton(AF_INET, "192.168.55.101", &ipv4_addr);
     return ipv4_addr;
 }
 
